@@ -33,8 +33,31 @@ impl WindowEventHandler {
             reactor.window_server_info_manager.window_server_info.insert(info.id, info);
         }
 
-        let frame = window.frame;
+        let mut frame = window.frame;
+        let existing_native_tab = reactor
+            .window_manager
+            .windows
+            .get(&wid)
+            .and_then(|existing| existing.native_tab);
+        let existing_ignore_app_rule = reactor
+            .window_manager
+            .windows
+            .get(&wid)
+            .is_some_and(|existing| existing.ignore_app_rule);
+        let existing_frame = reactor
+            .window_manager
+            .windows
+            .get(&wid)
+            .map(|existing| existing.frame_monotonic);
         let mut window_state: WindowState = window.into();
+        window_state.native_tab = existing_native_tab;
+        window_state.ignore_app_rule = existing_ignore_app_rule;
+        if existing_native_tab.is_some() {
+            if let Some(existing_frame) = existing_frame {
+                window_state.frame_monotonic = existing_frame;
+                frame = existing_frame;
+            }
+        }
         let is_manageable = utils::compute_window_manageability(
             window_state.info.sys_id,
             window_state.info.is_minimized,
@@ -53,6 +76,10 @@ impl WindowEventHandler {
 
         let server_id = window_state.info.sys_id;
         reactor.window_manager.windows.insert(wid, window_state);
+
+        if reactor.maybe_hold_native_tab_window_created(wid) {
+            return;
+        }
 
         if is_manageable {
             let active_space = active_space_for_window(reactor, &frame, server_id);
@@ -75,6 +102,10 @@ impl WindowEventHandler {
     }
 
     pub fn handle_window_destroyed(reactor: &mut Reactor, wid: WindowId) -> bool {
+        if reactor.defer_native_tab_window_destroy(wid) {
+            return false;
+        }
+        reactor.finalize_native_tab_window_destroy(wid);
         let window_server_id = match reactor.window_manager.windows.get(&wid) {
             Some(window) => window.info.sys_id,
             None => return false,
@@ -225,6 +256,7 @@ impl WindowEventHandler {
             let pending_target = server_id.and_then(|wsid| {
                 reactor.transaction_manager.get_target_frame(wsid).map(|target| (wsid, target))
             });
+            let pending_native_tab_target = reactor.native_tab_manager.pending_frame_target(wid);
 
             let last_sent_txid = server_id
                 .map(|wsid| reactor.transaction_manager.get_last_sent_txid(wsid))
@@ -234,10 +266,12 @@ impl WindowEventHandler {
             let mut triggered_by_rift =
                 has_pending_request && last_seen.is_some_and(|seen| seen == last_sent_txid);
 
-            if effective_mouse_state == Some(MouseState::Down) && triggered_by_rift {
+            if effective_mouse_state == Some(MouseState::Down) && has_pending_request {
                 if let Some((wsid, _)) = pending_target {
                     reactor.transaction_manager.clear_target_for_window(wsid);
+                    reactor.transaction_manager.set_last_sent_txid(wsid, last_sent_txid.next());
                 }
+                reactor.native_tab_manager.clear_pending_frame_target(wid);
                 triggered_by_rift = false;
                 has_pending_request = false;
             }
@@ -247,7 +281,44 @@ impl WindowEventHandler {
                 return false;
             }
 
+            if !has_pending_request
+                && requested.0
+                && last_seen.is_some_and(|seen| seen != last_sent_txid)
+            {
+                debug!(?last_seen, ?last_sent_txid, "Ignoring stale requested frame change");
+                return false;
+            }
+
+            if let Some(target) = pending_native_tab_target
+                && last_seen.is_none()
+                && !requested.0
+                && effective_mouse_state != Some(MouseState::Down)
+            {
+                if new_frame.same_as(target) {
+                    if let Some(window) = reactor.window_manager.windows.get_mut(&wid)
+                        && !window.frame_monotonic.same_as(new_frame)
+                    {
+                        debug!(?wid, ?new_frame, "Final native-tab frame matched pending target");
+                        window.frame_monotonic = new_frame;
+                    }
+                    if let Some((wsid, _)) = pending_target {
+                        reactor.transaction_manager.clear_target_for_window(wsid);
+                    }
+                    reactor.native_tab_manager.clear_pending_frame_target(wid);
+                } else {
+                    trace!(
+                        ?wid,
+                        ?new_frame,
+                        ?target,
+                        "Ignoring stale native-tab frame change while pending requested frame"
+                    );
+                    reactor.retry_pending_native_tab_frame_target(wid);
+                }
+                return false;
+            }
+
             if triggered_by_rift {
+                let mut should_sync_native_tabs = false;
                 let Some(window) = reactor.window_manager.windows.get_mut(&wid) else {
                     return false;
                 };
@@ -259,6 +330,8 @@ impl WindowEventHandler {
                             window.frame_monotonic = new_frame;
                         }
                         reactor.transaction_manager.clear_target_for_window(wsid);
+                        reactor.native_tab_manager.clear_pending_frame_target(wid);
+                        should_sync_native_tabs = true;
                     } else {
                         trace!(
                             ?wid,
@@ -277,12 +350,18 @@ impl WindowEventHandler {
                     if let Some(wsid) = window.info.sys_id {
                         reactor.transaction_manager.clear_target_for_window(wsid);
                     }
+                    reactor.native_tab_manager.clear_pending_frame_target(wid);
+                    should_sync_native_tabs = true;
                 }
 
+                if should_sync_native_tabs {
+                    reactor.handle_native_tab_frame_changed(wid, true);
+                }
                 return false;
             }
 
             if requested.0 {
+                let mut should_sync_native_tabs = false;
                 if let Some(window) = reactor.window_manager.windows.get_mut(&wid) {
                     if !window.frame_monotonic.same_as(new_frame) {
                         debug!(
@@ -292,9 +371,14 @@ impl WindowEventHandler {
                         );
                         window.frame_monotonic = new_frame;
                     }
+                    should_sync_native_tabs = true;
                 }
                 if let Some(wsid) = server_id {
                     reactor.transaction_manager.clear_target_for_window(wsid);
+                }
+                reactor.native_tab_manager.clear_pending_frame_target(wid);
+                if should_sync_native_tabs {
+                    reactor.handle_native_tab_frame_changed(wid, true);
                 }
                 return false;
             }
@@ -319,6 +403,7 @@ impl WindowEventHandler {
             }
 
             let dragging = effective_mouse_state == Some(MouseState::Down) || reactor.is_in_drag();
+            reactor.handle_native_tab_frame_changed(wid, !dragging);
 
             if !dragging {
                 reactor.drag_manager.skip_layout_for_window = Some(wid);
