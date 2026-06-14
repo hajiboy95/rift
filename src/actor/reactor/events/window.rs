@@ -285,7 +285,11 @@ impl WindowEventHandler {
                 && requested.0
                 && last_seen.is_some_and(|seen| seen != last_sent_txid)
             {
-                debug!(?last_seen, ?last_sent_txid, "Ignoring stale requested frame change");
+                debug!(
+                    ?last_seen,
+                    ?last_sent_txid,
+                    "Ignoring stale requested frame change"
+                );
                 return false;
             }
 

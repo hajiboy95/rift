@@ -1600,9 +1600,9 @@ fn discovery_after_display_change_places_window_on_correct_display() {
     );
 }
 
-use crate::sys::window_server::WindowServerInfo;
 use super::events::window::WindowEventHandler;
 use crate::model::reactor::NativeTabRole;
+use crate::sys::window_server::WindowServerInfo;
 
 fn test_reactor() -> Reactor {
     Reactor::new_for_test(LayoutEngine::new(
@@ -1621,10 +1621,15 @@ fn rewrite_window_server_ids_for_testing(reactor: &mut Reactor, pid: pid_t) {
             if let Some(old_wsid) = old_wsid {
                 reactor.window_manager.window_ids.remove(&old_wsid);
                 reactor.window_manager.visible_windows.remove(&old_wsid);
-                if let Some(info) = reactor.window_server_info_manager.window_server_info.remove(&old_wsid) {
+                if let Some(info) =
+                    reactor.window_server_info_manager.window_server_info.remove(&old_wsid)
+                {
                     let mut new_info = info;
                     new_info.id = WindowServerId::new(idx);
-                    reactor.window_server_info_manager.window_server_info.insert(new_info.id, new_info);
+                    reactor
+                        .window_server_info_manager
+                        .window_server_info
+                        .insert(new_info.id, new_info);
                 }
             }
             let new_wsid = WindowServerId::new(idx);
@@ -2455,20 +2460,21 @@ fn closing_last_tab_clears_stale_pending_native_tab_appearance_state() {
     let wid = WindowId::new(1, 1);
     let frame = reactor.window_manager.windows[&wid].frame_monotonic;
     let phantom_wsid = WindowServerId::new(2);
-    assert!(!reactor.note_native_tab_appearance(
-        phantom_wsid,
-        space,
-        WindowServerInfo {
+    assert!(
+        !reactor.note_native_tab_appearance(phantom_wsid, space, WindowServerInfo {
             id: phantom_wsid,
             pid: 1,
             layer: 0,
             frame,
             min_frame: CGSize::ZERO,
             max_frame: CGSize::ZERO,
-        },
-    ));
+        },)
+    );
 
-    assert_eq!(reactor.native_tab_manager.pending_appearances_for_pid(1).len(), 1);
+    assert_eq!(
+        reactor.native_tab_manager.pending_appearances_for_pid(1).len(),
+        1
+    );
     assert!(reactor.window_manager.visible_windows.contains(&phantom_wsid));
     assert!(
         reactor
@@ -2700,4 +2706,3 @@ fn pending_refresh_empty_discovery_is_one_shot_and_allows_later_stale_cleanup() 
 
     assert_window_removed_from_layout(&reactor, space, wid);
 }
-

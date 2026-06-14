@@ -127,7 +127,7 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     fn contains_window(&self, layout: LayoutId, wid: WindowId) -> bool;
     fn select_window(&mut self, layout: LayoutId, wid: WindowId) -> bool;
     /// Rekey a window ID in the layout system from `old` to `new`.
-    /// 
+    ///
     /// Implementations overriding this method MUST ensure all internal state keyed by
     /// window ID (such as proportional splits, focus center offsets, or cached constraints)
     /// is updated to reference the `new` window ID, so that no stale references to `old` remain.

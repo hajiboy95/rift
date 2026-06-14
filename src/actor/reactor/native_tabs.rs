@@ -544,7 +544,8 @@ impl Reactor {
     }
 
     pub(super) fn reconcile_native_tabs_for_pid(&mut self, pid: pid_t, known_visible: &[WindowId]) {
-        self.native_tab_manager.purge_expired_pending_states(std::time::Duration::from_secs(3));
+        self.native_tab_manager
+            .purge_expired_pending_states(std::time::Duration::from_secs(3));
 
         let known_visible: std::collections::HashSet<WindowId> =
             known_visible.iter().copied().collect();
