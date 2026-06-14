@@ -162,6 +162,7 @@ impl AnimationManager {
         let mut animated_count = 0;
         let mut animated_wids_wsids: Vec<u32> = Vec::new();
         let mut any_frame_changed = false;
+        let mut synced_native_tab_wids = Vec::new();
 
         for &(wid, target_frame) in layout {
             // Skip applying layout frames and animations for the window currently being dragged.
@@ -181,22 +182,21 @@ impl AnimationManager {
                         if target_frame.same_as(current_frame) {
                             continue;
                         }
-                        let wsid = window.info.sys_id;
-                        if let Some(wsid) = wsid {
-                            if reactor
-                                .transaction_manager
-                                .get_target_frame(wsid)
-                                .is_some_and(|pending| pending.same_as(target_frame))
-                            {
-                                trace!(?wid, ?target_frame, "Skipping redundant layout request");
-                                continue;
-                            }
+                        let Some(wsid) = window.info.sys_id else {
+                            debug!(?wid, "Skipping animated layout - window has no server id");
+                            continue;
+                        };
+                        if reactor
+                            .transaction_manager
+                            .get_target_frame(wsid)
+                            .is_some_and(|pending| pending.same_as(target_frame))
+                        {
+                            trace!(?wid, ?target_frame, "Skipping redundant layout request");
+                            continue;
                         }
                         any_frame_changed = true;
-                        let txid = wsid
-                            .map(|wsid| reactor.transaction_manager.generate_next_txid(wsid))
-                            .unwrap_or_default();
-                        (current_frame, wsid, txid)
+                        let txid = reactor.transaction_manager.generate_next_txid(wsid);
+                        (current_frame, Some(wsid), txid)
                     }
                     None => {
                         debug!(?wid, "Skipping - window no longer exists");
@@ -204,7 +204,7 @@ impl AnimationManager {
                     }
                 };
 
-            let Some(app_state) = &reactor.app_manager.apps.get(&wid.pid) else {
+            let Some(app_state) = reactor.app_manager.apps.get(&wid.pid) else {
                 debug!(?wid, "Skipping for window - app no longer exists");
                 continue;
             };
@@ -245,6 +245,7 @@ impl AnimationManager {
             if let Some(window) = reactor.window_manager.windows.get_mut(&wid) {
                 window.frame_monotonic = target_frame;
             }
+            synced_native_tab_wids.push(wid);
         }
 
         if animated_count > 0 {
@@ -260,6 +261,9 @@ impl AnimationManager {
             } else {
                 anim.run();
             }
+        }
+        for wid in synced_native_tab_wids {
+            reactor.handle_native_tab_frame_changed(wid, true);
         }
 
         any_frame_changed
@@ -290,15 +294,17 @@ impl AnimationManager {
             if target_frame.same_as(current_frame) {
                 continue;
             }
-            if let Some(wsid) = window.info.sys_id {
-                if reactor
-                    .transaction_manager
-                    .get_target_frame(wsid)
-                    .is_some_and(|pending| pending.same_as(target_frame))
-                {
-                    trace!(?wid, ?target_frame, "Skipping redundant instant layout request");
-                    continue;
-                }
+            let Some(wsid) = window.info.sys_id else {
+                debug!(?wid, "Skipping instant layout - window has no server id");
+                continue;
+            };
+            if reactor
+                .transaction_manager
+                .get_target_frame(wsid)
+                .is_some_and(|pending| pending.same_as(target_frame))
+            {
+                trace!(?wid, ?target_frame, "Skipping redundant instant layout request");
+                continue;
             }
             any_frame_changed = true;
             let is_hidden =
@@ -365,9 +371,60 @@ impl AnimationManager {
                 if let Some(window) = reactor.window_manager.windows.get_mut(wid) {
                     window.frame_monotonic = *target_frame;
                 }
+                reactor.handle_native_tab_frame_changed(*wid, true);
             }
         }
 
         any_frame_changed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+
+    use super::AnimationManager;
+    use crate::actor::reactor::testing::{Apps, make_window, screen_params_event};
+    use crate::actor::reactor::{Reactor, WindowId};
+    use crate::layout_engine::LayoutEngine;
+    use crate::sys::screen::SpaceId;
+
+    #[test]
+    fn layout_application_skips_windows_without_window_server_ids() {
+        let mut apps = Apps::new();
+        let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+            &crate::common::config::VirtualWorkspaceSettings::default(),
+            &crate::common::config::LayoutSettings::default(),
+            None,
+        ));
+        let space = SpaceId::new(90);
+        reactor.handle_event(screen_params_event(
+            vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
+            vec![Some(space)],
+            vec![],
+        ));
+
+        reactor.handle_events(apps.make_app(1, vec![make_window(1)]));
+        apps.simulate_until_quiet(&mut reactor);
+        let _ = apps.requests();
+
+        let wid = WindowId::new(1, 1);
+        let target = CGRect::new(CGPoint::new(300., 50.), CGSize::new(400., 700.));
+        reactor.window_manager.windows.get_mut(&wid).unwrap().info.sys_id = None;
+
+        assert!(!AnimationManager::animate_layout(
+            &mut reactor,
+            space,
+            &[(wid, target)],
+            false,
+            None,
+        ));
+        assert!(!AnimationManager::instant_layout(
+            &mut reactor,
+            space,
+            &[(wid, target)],
+            None,
+        ));
+        assert!(apps.requests().is_empty());
     }
 }

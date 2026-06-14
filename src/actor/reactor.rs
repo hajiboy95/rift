@@ -9,6 +9,7 @@ mod display_topology;
 mod events;
 mod main_window;
 mod managers;
+mod native_tabs;
 mod query;
 mod replay;
 pub mod transaction_manager;
@@ -65,8 +66,8 @@ type Receiver = actor::Receiver<Event>;
 pub use query::ReactorQueryHandle;
 
 pub(crate) use crate::model::reactor::{
-    AppState, FullscreenSpaceTrack, FullscreenWindowTrack, PendingSpaceChange, WindowFilter,
-    WindowState,
+    AppState, FullscreenSpaceTrack, FullscreenWindowTrack, NativeTabMembership, NativeTabRole,
+    PendingSpaceChange, WindowFilter, WindowState,
 };
 pub use crate::model::reactor::{
     Command, DisplaySelector, DragSession, DragState, MenuState, MissionControlState,
@@ -238,6 +239,7 @@ pub struct Reactor {
     app_manager: managers::AppManager,
     layout_manager: managers::LayoutManager,
     window_manager: managers::WindowManager,
+    native_tab_manager: managers::NativeTabManager,
     window_server_info_manager: managers::WindowServerInfoManager,
     space_manager: managers::SpaceManager,
     space_activation_policy: SpaceActivationPolicy,
@@ -321,6 +323,7 @@ impl Reactor {
                 visible_windows: HashSet::default(),
                 observed_window_server_ids: HashSet::default(),
             },
+            native_tab_manager: managers::NativeTabManager::new(),
             window_server_info_manager: managers::WindowServerInfoManager {
                 window_server_info: HashMap::default(),
             },
@@ -979,6 +982,9 @@ impl Reactor {
             }
             Event::ResyncAppForWindow(wsid) => {
                 AppEventHandler::handle_resync_app_for_window(self, wsid);
+            }
+            Event::ApplicationMainWindowChanged(pid, wid, quiet) => {
+                self.handle_native_tab_main_window_changed(pid, wid, quiet);
             }
             Event::ApplicationGloballyActivated(pid) => {
                 self.clear_menu_state_for_non_owner(pid);
@@ -1765,13 +1771,6 @@ impl Reactor {
     fn window_center_on_known_screen(&self, wid: WindowId) -> Option<CGPoint> {
         let window_center = self.window_manager.windows.get(&wid)?.frame_monotonic.mid();
         self.screen_for_point(window_center).map(|_| window_center)
-    }
-
-    fn has_visible_window_server_ids_for_pid(&self, pid: pid_t) -> bool {
-        self.window_manager
-            .visible_windows
-            .iter()
-            .any(|wsid| self.window_manager.window_ids.get(wsid).is_some_and(|wid| wid.pid == pid))
     }
 
     pub fn warp_mouse(&mut self, point: CGPoint) {
@@ -2831,6 +2830,10 @@ impl Reactor {
         self.check_for_new_windows();
         self.update_layout_or_warn(false, false);
         self.maybe_send_menu_update();
+    }
+
+    fn refresh_all_windows_without_pending_refresh(&mut self) {
+        self.request_visible_windows_for_apps(false);
     }
 
     fn force_refresh_all_windows(&mut self) { self.request_visible_windows_for_apps(true); }
